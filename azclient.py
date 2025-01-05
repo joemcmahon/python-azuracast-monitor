@@ -6,6 +6,7 @@ from datetime import datetime
 from collections import namedtuple
 
 def convert(seconds):
+    """Convert a duration in seconds to HH::M::SS"""
     hours = seconds // 3600
     seconds %= 3600
     minutes = seconds // 60
@@ -19,6 +20,12 @@ def with_urllib3(url, headers):
     return http.request('GET', url, preload_content=False, headers=headers)
 
 def construct_sse_url(server, shortcode):
+    """Builds out an Azuracast SSE URL.
+
+       - server: the domain name of your Azuracast server
+       - shortcode: the station's "shortcode" name, found in the station
+                    profile on your Azuracast server
+    """
     subs = {
         "subs": {
             f"station:{shortcode}": {"recover": True}
@@ -31,31 +38,37 @@ def construct_sse_url(server, shortcode):
     baseURL = f"https://{server}"
     return f"{baseURL}/api/live/nowplaying/sse?cf_connect={encoded_query}"
 
-
-# Note: If you're having trouble connecting to your Azuracast server,
-# or you're not seeing any output, uncomment the following two lines,
-# run the script, and then use `curl -N` with the printed URL to
-# verify that you can connect to the SSE now-playing API on your server.
-
-# print(construct_sse_url("your.server", "your_stations_shortcode"))
-# exit
-
-# set up the client
 def build_sse_client(server, shortcode):
+    """Constructs an SSE client for the given server and shortcode."""
     headers = {'Accept': 'text/event-stream'}
     response = with_urllib3(construct_sse_url(server, shortcode), headers)
     return sseclient.SSEClient(response)
 
+"""The NowPlayingResponse encapsulates the  usually-desired
+   data from the SSE response. The SSE now-playing data
+   contains much more than the data captured here; if you
+   want things like the play history, etc., they are
+   available; expanding this object and extract_metadata
+   will be necessary to capture them.
+"""
 NowPlayingResponse = namedtuple('NowPlaying', ['dj', 'live', 'duration', 'elapsed',
                                                'start', 'artist', 'track', 'album', 'artURL'])
 
 def formatted_result(result):
+    """
+    formatted _result returns a string version of the
+    captured data. Useful for logging or debugging.
+    """
     on_album = ""
     if result.album != "":
         on_album = " on \"{result.album}\""
     return f"[{result.start}] \"{result.track}\", by {result.artist}{on_album} {result.elapsed}/{result.duration}\n" + f"DJ: {result.dj} {result.live}\n"
 
 def extract_metadata(np):
+    """
+    This function takes a record from the SSE client and
+    extracts the metadata from it into a NowPlayingResponse.
+    """
     livestatus = np['live']
     now_playing = np['now_playing']
     song = now_playing['song']
@@ -81,6 +94,18 @@ def extract_metadata(np):
 
  # Run the client, passing parsed messages to the callback
 def run(client, callback):
+    """
+    Runs the client created by build_sse_client and
+    makes a callback to the function of your choice
+    each time a new event occurs.
+
+    Example:
+        client = build_sse_client("spiral.radio", "radiospiral")
+        run(client, lambda result: print(formatted_result(result)))
+
+    The callback receives a NowPlayingResponse object.
+
+    """
     for event in client.events():
         payload = json.loads(event.data)
         if 'connect' in payload:
@@ -93,8 +118,3 @@ def run(client, callback):
             result = extract_metadata(np)
             print(formatted_result(result))
             callback(result)
-# Usage:
-# client = build_sse_client("spiral.radio", "radiospiral")
-# run(client, lambda result: print(formatted_result(result)))
-#
-# Your callback should use the 'result' object to do whatever it is you need.
