@@ -2,8 +2,39 @@ import json
 import pprint
 import sseclient
 import urllib.parse
+
 from datetime import datetime
 from collections import namedtuple
+from dataclasses import dataclass
+
+@dataclass
+class NowPlayingResponse:
+    """The NowPlayingResponse encapsulates the  usually-desired
+       data from the SSE response. The SSE now-playing data
+       contains much more than the data captured here; if you
+       want things like the play history, etc., they are
+       available; expanding this object and extract_metadata
+       will be necessary to capture them.
+    """
+    dj: str
+    live: bool
+    duration: str
+    elapsed: str
+    start: datetime
+    artist: str
+    track: str
+    album: str
+    artURL: str
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, NowPlayingResponse):
+            return False
+        if other is None:
+            return False
+        return (self.dj == other.dj and
+               self.artist == other.artist and
+               self.track == other.track and
+               self.album == other.album)
 
 def convert(seconds):
     """Convert a duration in seconds to HH::M::SS"""
@@ -44,16 +75,6 @@ def build_sse_client(server, shortcode):
     response = with_urllib3(construct_sse_url(server, shortcode), headers)
     return sseclient.SSEClient(response)
 
-"""The NowPlayingResponse encapsulates the  usually-desired
-   data from the SSE response. The SSE now-playing data
-   contains much more than the data captured here; if you
-   want things like the play history, etc., they are
-   available; expanding this object and extract_metadata
-   will be necessary to capture them.
-"""
-NowPlayingResponse = namedtuple('NowPlaying', ['dj', 'live', 'duration', 'elapsed',
-                                               'start', 'artist', 'track', 'album', 'artURL'])
-
 def formatted_result(result):
     """
     formatted _result returns a string version of the
@@ -84,12 +105,12 @@ def extract_metadata(np):
     track = song['title']
     album = song['album']
     artwork_url = song['art']
-    formatted_date = datetime.fromtimestamp(started_datestamp)
+    start_datetime = datetime.fromtimestamp(started_datestamp)
     formatted_runtime = convert(duration_secs)
     formatted_elapsed = convert(elapsed)
     return NowPlayingResponse(
                 streamer, live, formatted_runtime, formatted_elapsed,
-                formatted_date, artist, track, album, artwork_url)
+                start_datetime, artist, track, album, artwork_url)
 
 
  # Run the client, passing parsed messages to the callback
@@ -103,8 +124,9 @@ def run(client, callback):
         client = build_sse_client("spiral.radio", "radiospiral")
         run(client, lambda result: print(formatted_result(result)))
 
-    The callback receives a NowPlayingResponse object.
-
+    The callback receives a NowPlayingResponse object for every event
+    returned by the SSE server; you must monitor these events and
+    decide which ones to process.
     """
     for event in client.events():
         payload = json.loads(event.data)
