@@ -138,5 +138,6 @@ def run(client, callback):
         if 'channel' in payload:
             np = payload['pub']['data']['np']
             result = extract_metadata(np)
-            print(formatted_result(result))
+            if os.getenv["AZ_CLIENT_DEBUG"] != "":
+                print(formatted_result(result))
             callback(result)
