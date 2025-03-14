@@ -2,6 +2,7 @@ import json
 import pprint
 import sseclient
 import urllib.parse
+import os
 
 from datetime import datetime
 from collections import namedtuple
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 
 @dataclass
 class NowPlayingResponse:
-    """The NowPlayingResponse encapsulates the  usually-desired
+    """The NowPlayingResponse encapsulates the usually-desired
        data from the SSE response. The SSE now-playing data
        contains much more than the data captured here; if you
        want things like the play history, etc., they are
@@ -82,7 +83,7 @@ def formatted_result(result):
     """
     on_album = ""
     if result.album != "":
-        on_album = " on \"{result.album}\""
+        on_album = f" on \"{result.album}\""
     return f"[{result.start}] \"{result.track}\", by {result.artist}{on_album} {result.elapsed}/{result.duration}\n" + f"DJ: {result.dj} {result.live}\n"
 
 def extract_metadata(np):
@@ -91,6 +92,7 @@ def extract_metadata(np):
     extracts the metadata from it into a NowPlayingResponse.
     """
     livestatus = np['live']
+
     now_playing = np['now_playing']
     song = now_playing['song']
     streamer = "Spud the Ambient Robot"
@@ -108,6 +110,23 @@ def extract_metadata(np):
     start_datetime = datetime.fromtimestamp(started_datestamp)
     formatted_runtime = convert(duration_secs)
     formatted_elapsed = convert(elapsed)
+    # Work around streamer quirks
+    if streamer == "Cypress Rosewood":
+        # Tony's metadata has the track name in 'artist'
+        # and the artist name in 'track'; 'album' is unset.
+        save = artist
+        artist = track
+        track = save
+    else:
+        if album == "":
+            parts = track.split(' - ')
+            if len(parts) == 2:
+                track = parts[0]
+                album = parts[1]
+            if len(parts) > 2:
+                album = parts[-1]
+                track = parts[:-2].join(' - ')
+
     return NowPlayingResponse(
                 streamer, live, formatted_runtime, formatted_elapsed,
                 start_datetime, artist, track, album, artwork_url)
@@ -138,6 +157,6 @@ def run(client, callback):
         if 'channel' in payload:
             np = payload['pub']['data']['np']
             result = extract_metadata(np)
-            if os.getenv["AZ_CLIENT_DEBUG"] != "":
+            if os.getenv("AZ_CLIENT_DEBUG") != "":
                 print(formatted_result(result))
             callback(result)

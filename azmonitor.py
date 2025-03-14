@@ -20,8 +20,9 @@ def send_webhook(embed_data):
     embed = DiscordEmbed(
         title=embed_data['title'],
         description=embed_data['description'],
-        timestamp=embed_data['timestamp']
     )
+    if embed_data['timestamp'] != 0:
+        embed.set_timestamp(embed_data['timestamp'])
     embed.set_thumbnail(url=embed_data['thumbnail_url'])
     webhook.add_embed(embed)
     response = webhook.execute()
@@ -37,9 +38,12 @@ def wrapper(startup, last_response):
         # Prepare the embed data
         local_tz = get_localzone()
         start = response.start.replace(tzinfo=local_tz)
+        album_part = ""
+        if response.album != "":
+            album_part = f"from _{response.album}_ by "
         embed_data = {
             "title": f"{response.track}",
-            "description": f"from _{response.album}_ by {response.artist} ({response.duration})",
+            "description": f"{album_part}{response.artist} ({response.duration})",
             "timestamp": start,
             "thumbnail_url": response.artURL,
         }
