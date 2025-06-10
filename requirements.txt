@@ -13,7 +13,7 @@ multidict==6.1.0
 pip==24.3.1
 propcache==0.2.1
 python-dotenv==1.0.1
-requests==2.32.3
+requests==2.32.4
 setuptools==78.1.1
 six==1.17.0
 sseclient-py==1.8.0
