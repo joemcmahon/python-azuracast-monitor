@@ -31,3 +31,6 @@ modules via `requirements.txt`, set up your Discord bot, add the bot token and
 webhook URL to `.env`, and then run `python azmonitor.py` to start the monitor.
 
 If you prefer Docker, then a `docker build .` or a `docker-compose up` will work.
+The `docker-compose` file restarts the monitor once every 24 hours, as Python's
+memory management seems to leak in the SSE monitor, eventually causing it to
+stop responding. A once-a-day restart is a cheap and simple way to fix this.
