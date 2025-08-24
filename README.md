@@ -30,4 +30,4 @@ If you want to run the monitor directly, then you should install the reqired
 modules via `requirements.txt`, set up your Discord bot, add the bot token and
 webhook URL to `.env`, and then run `python azmonitor.py` to start the monitor.
 
-If you prefer Docker, then a `docker build .`
+If you prefer Docker, then a `docker build .` or a `docker-compose up` will work.
