@@ -3,10 +3,16 @@ import pprint
 import sseclient
 import urllib.parse
 import os
+import time
+import logging
+from typing import Callable, Optional
 
 from datetime import datetime
 from collections import namedtuple
 from dataclasses import dataclass
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 @dataclass
 class NowPlayingResponse:
@@ -45,10 +51,26 @@ def convert(seconds):
     seconds %= 60
     return f"{hours:02}:{minutes:02}:{seconds:02}"
 
-def with_urllib3(url, headers):
-    """Get a streaming response for the given event feed using urllib3."""
+def with_urllib3(url, headers, timeout=30):
+    """Get a streaming response for the given event feed using urllib3.
+
+    Args:
+        url: The SSE endpoint URL
+        headers: HTTP headers for the request
+        timeout: Connection timeout in seconds (default: 30)
+
+    Returns:
+        urllib3 HTTPResponse object
+
+    Raises:
+        urllib3.exceptions.HTTPError: On HTTP errors
+        urllib3.exceptions.TimeoutError: On timeout
+    """
     import urllib3
-    http = urllib3.PoolManager()
+    http = urllib3.PoolManager(
+        timeout=urllib3.Timeout(connect=timeout, read=300),
+        retries=False  # We'll handle retries at a higher level
+    )
     return http.request('GET', url, preload_content=False, headers=headers)
 
 def construct_sse_url(server, shortcode):
@@ -133,24 +155,30 @@ def extract_metadata(np):
 
 
  # Run the client, passing parsed messages to the callback
-def run(client, callback):
+def run(client, callback, shortcode):
     """
     Runs the client created by build_sse_client and
     makes a callback to the function of your choice
     each time a new event occurs.
 
+    Args:
+        client: SSE client created by build_sse_client
+        callback: Function to call with each NowPlayingResponse
+        shortcode: Station shortcode (must match the one used in build_sse_client)
+
     Example:
         client = build_sse_client("spiral.radio", "radiospiral")
-        run(client, lambda result: print(formatted_result(result)))
+        run(client, lambda result: print(formatted_result(result)), "radiospiral")
 
     The callback receives a NowPlayingResponse object for every event
     returned by the SSE server; you must monitor these events and
     decide which ones to process.
     """
+    station_key = f"station:{shortcode}"
     for event in client.events():
         payload = json.loads(event.data)
         if 'connect' in payload:
-            np = payload['connect']['subs']['station:radiospiral']['publications'][0]['data']['np']
+            np = payload['connect']['subs'][station_key]['publications'][0]['data']['np']
             result = extract_metadata(np)
             callback(result)
 

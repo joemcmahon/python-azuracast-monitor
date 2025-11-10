@@ -169,3 +169,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Backup files (we have git!)
+*.backup
+
+# nohup output
+nohup.out
