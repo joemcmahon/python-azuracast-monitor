@@ -11,7 +11,7 @@ frozenlist==1.5.0
 idna==3.10
 multidict==6.1.0
 propcache==0.2.1
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 requests==2.33.0
 six==1.17.0
 sseclient-py==1.8.0
