@@ -3,7 +3,8 @@ services:
   az-now-playing:
     image: az-now-playing:latest
     container_name: az-now-playing
-      
+    restart: unless-stopped
+
   restarter:
     image: docker:cli
     restart: unless-stopped
