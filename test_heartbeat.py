@@ -1,7 +1,10 @@
 """Tests for heartbeat.py"""
+import contextlib
+import io
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 import heartbeat
 from heartbeat import Heartbeat, check_heartbeat, heartbeat_path, main
@@ -66,3 +69,37 @@ class TestHeartbeat(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMaxAge(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.path = heartbeat_path(self.dir)
+        Heartbeat(self.path).touch()
+
+    def run_main(self, value, age):
+        os.utime(self.path, (1000, 1000))
+        env = {"STATE_DIR": self.dir, "HEARTBEAT_MAX_AGE": value}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), \
+                unittest.mock.patch("heartbeat.time.time", return_value=1000 + age):
+            code = main(env)
+        return code, err.getvalue()
+
+    def test_bad_values_fall_back_to_900(self):
+        for bad in ("", "abc", "0", "-5", "nan", "inf", "  "):
+            with self.subTest(value=bad):
+                code, err = self.run_main(bad, 800)
+                self.assertEqual(code, 0)
+                self.assertIn("HEARTBEAT_MAX_AGE", err)
+                self.assertIn("900", err)
+                code, _ = self.run_main(bad, 901)
+                self.assertEqual(code, 1)
+
+    def test_valid_value_is_used_silently(self):
+        code, err = self.run_main("120", 100)
+        self.assertEqual((code, err), (0, ""))
+        code, _ = self.run_main("120", 121)
+        self.assertEqual(code, 1)
