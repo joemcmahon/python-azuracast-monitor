@@ -5,8 +5,13 @@ import time
 import logging
 from typing import Callable
 from azclient import build_sse_client
+from settings import DEFAULT_AUTODJ_NAME
 
 logger = logging.getLogger(__name__)
+
+
+# Minimum pause (seconds) after any normal connection close.
+CLEAN_CLOSE_FLOOR = 1.0
 
 
 class ResilientRunner:
@@ -14,18 +19,29 @@ class ResilientRunner:
     Wraps the SSE client with automatic reconnection and exponential backoff
     """
 
-    def __init__(self, server, shortcode, callback, max_retries=None):
+    def __init__(self, server, shortcode, callback, max_retries=None,
+                 autodj_name=DEFAULT_AUTODJ_NAME, read_timeout=300.0,
+                 on_event=None, on_connect=None):
         """
         Args:
             server: Azuracast server domain
             shortcode: Station shortcode
             callback: Function to call with each NowPlayingResponse
             max_retries: Maximum number of retries (None = infinite)
+            autodj_name: Name reported as the DJ when no live streamer is on
+            read_timeout: SSE read timeout in seconds
+            on_event: Optional no-argument hook called for every SSE event
+            on_connect: Optional no-argument hook called after each
+                successful (HTTP 200) connection
         """
         self.server = server
         self.shortcode = shortcode
         self.callback = callback
         self.max_retries = max_retries
+        self.autodj_name = autodj_name
+        self.read_timeout = read_timeout
+        self.on_event = on_event
+        self.on_connect = on_connect
         self.retry_count = 0
 
         # Backoff configuration
@@ -81,18 +97,52 @@ class ResilientRunner:
                 logger.error(f"Max retries ({self.max_retries}) exceeded, giving up")
                 return 1
 
+            delivered = False
+
+            def handle_event():
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    # First event on this connection: it is healthy.
+                    self._reset_backoff()
+                if self.on_event is not None:
+                    try:
+                        self.on_event()
+                    except Exception:
+                        logger.exception("on_event hook failed; ignoring")
+
             try:
                 logger.info(f"Connecting to {self.server}/{self.shortcode} (attempt {self.retry_count + 1})")
 
                 # Build the client
-                client = build_sse_client(self.server, self.shortcode)
+                client = build_sse_client(self.server, self.shortcode,
+                                          read_timeout=self.read_timeout)
+                if self.on_connect is not None:
+                    try:
+                        self.on_connect()
+                    except Exception:
+                        logger.exception("on_connect hook failed; ignoring")
 
                 # Run the client
                 logger.info("Connection established, listening for events...")
-                run(client, self.callback, self.shortcode)
+                run(client, self.callback, self.shortcode,
+                    autodj_name=self.autodj_name, on_event=handle_event)
 
                 # If we get here, the connection closed normally
                 logger.warning("SSE connection closed")
+                if delivered:
+                    # Healthy connection (backoff already reset), but never
+                    # reconnect in a tight loop. Sleep in short slices; the
+                    # loop-top shutdown check runs right after the floor.
+                    start_time = time.time()
+                    while time.time() - start_time < CLEAN_CLOSE_FLOOR:
+                        time.sleep(0.5)
+                    continue
+
+                # Closed without a single event: treat as a failed attempt
+                # so we back off instead of reconnecting immediately.
+                logger.warning("SSE connection closed without delivering any event")
+                self.retry_count += 1
 
             except KeyboardInterrupt:
                 logger.info("Received keyboard interrupt")
@@ -102,22 +152,15 @@ class ResilientRunner:
                 logger.error(f"Error during SSE connection: {e}", exc_info=True)
                 self.retry_count += 1
 
-                # Calculate backoff
-                if not shutdown_check():
-                    backoff = self._calculate_backoff()
-                    logger.info(f"Reconnecting in {backoff:.1f} seconds...")
+            # Failed attempt: back off (shutdown-aware)
+            if not shutdown_check():
+                backoff = self._calculate_backoff()
+                logger.info(f"Reconnecting in {backoff:.1f} seconds...")
 
-                    # Wait with periodic shutdown checks
-                    start_time = time.time()
-                    while time.time() - start_time < backoff:
-                        if shutdown_check():
-                            logger.info("Shutdown requested during backoff, exiting")
-                            return 0
-                        time.sleep(0.5)  # Check every 500ms
-
-                    continue
-
-            # If we had a successful connection (no exception), reset backoff
-            if self.retry_count > 0:
-                logger.info("Connection was successful, resetting retry counter")
-                self._reset_backoff()
+                # Wait with periodic shutdown checks
+                start_time = time.time()
+                while time.time() - start_time < backoff:
+                    if shutdown_check():
+                        logger.info("Shutdown requested during backoff, exiting")
+                        return 0
+                    time.sleep(0.5)  # Check every 500ms

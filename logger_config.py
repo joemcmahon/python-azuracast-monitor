@@ -62,6 +62,11 @@ def setup_logging(log_level=None, log_file="azmonitor.log"):
     except (OSError, IOError) as e:
         root_logger.warning(f"Could not create file handler: {e}")
 
+    # urllib3's DEBUG output prints the full request path, which contains the
+    # Discord webhook token. Cap HTTP libraries at WARNING whatever LOG_LEVEL is.
+    for noisy in ("urllib3", "requests"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     return root_logger
 
 
