@@ -11,6 +11,29 @@ LABEL="label=az-monitor.managed=true"
 
 first_pass=1
 
+# Scope to our own compose project so a restarter can never touch containers
+# of another stack on the same daemon. PROJECT overrides (test hook).
+project="${PROJECT:-}"
+if [ -z "$project" ]; then
+    project="$("$DOCKER" inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$(hostname)" 2>/dev/null)"
+fi
+if [ -n "$project" ]; then
+    PROJECT_FILTER="label=com.docker.compose.project=$project"
+    echo "scoped to compose project: $project"
+else
+    PROJECT_FILTER=""
+    echo "WARNING: compose project unknown; running unscoped (all labelled containers on this daemon)"
+fi
+
+# List managed container IDs; extra args (e.g. --filter health=unhealthy) pass through.
+managed_ids() {
+    if [ -n "$PROJECT_FILTER" ]; then
+        "$DOCKER" ps -q --filter "$LABEL" --filter "$PROJECT_FILTER" "$@"
+    else
+        "$DOCKER" ps -q --filter "$LABEL" "$@"
+    fi
+}
+
 restart_ids() {
     for id in $1; do
         echo "restarting $id ($2)"
@@ -22,7 +45,7 @@ while true; do
     hm="${NOW_HM:-$(date +%H:%M)}"
     day="${NOW_DAY:-$(date +%F)}"
 
-    restart_ids "$("$DOCKER" ps -q --filter "$LABEL" --filter health=unhealthy)" unhealthy
+    restart_ids "$(managed_ids --filter health=unhealthy)" unhealthy
 
     # test(1) has no portable string ordering; compare HH:MM strings with expr.
     # Both are zero-padded, so string order is time order.
@@ -40,7 +63,7 @@ while true; do
             # bounce every monitor, just mark today as done.
             echo "startup after $RESTART_AT: marking $day done without restarting"
         else
-            restart_ids "$("$DOCKER" ps -q --filter "$LABEL")" daily
+            restart_ids "$(managed_ids)" daily
         fi
         echo "$day" > "$RESTARTER_STATE"
     fi

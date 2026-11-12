@@ -1,5 +1,6 @@
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -15,6 +16,10 @@ if [ "$1" = "ps" ]; then
     *health=unhealthy*) for i in $FAKE_UNHEALTHY; do echo "$i"; done ;;
     *) for i in $FAKE_MANAGED; do echo "$i"; done ;;
   esac
+fi
+if [ "$1" = "inspect" ]; then
+  [ -n "$FAKE_INSPECT" ] && echo "$FAKE_INSPECT"
+  [ -n "$FAKE_INSPECT_FAIL" ] && exit 1
 fi
 exit 0
 """
@@ -32,17 +37,21 @@ class RestarterTests(unittest.TestCase):
             f.write(FAKE_DOCKER)
         os.chmod(self.docker, os.stat(self.docker).st_mode | stat.S_IXUSR)
 
-    def run_pass(self, hm, day="2026-11-12", unhealthy="", managed=""):
+    def run_pass(self, hm, day="2026-11-12", unhealthy="", managed="",
+                 extra=None):
         env = dict(os.environ)
+        env.pop("PROJECT", None)
         env.update({
             "DOCKER": self.docker, "RUN_ONCE": "1", "NOW_HM": hm,
             "NOW_DAY": day, "RESTARTER_STATE": self.state,
             "FAKE_LOG": self.log, "FAKE_UNHEALTHY": unhealthy,
             "FAKE_MANAGED": managed,
         })
+        env.update(extra or {})
         result = subprocess.run(["sh", SCRIPT], env=env, capture_output=True,
                                 text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
+        return result
 
     def calls(self):
         if not os.path.exists(self.log):
@@ -96,6 +105,40 @@ class RestarterTests(unittest.TestCase):
         self.assertTrue(ps_calls)
         for call in ps_calls:
             self.assertIn("label=az-monitor.managed=true", call)
+
+    def ps_calls(self):
+        return [c for c in self.calls() if c.startswith("ps")]
+
+    def test_ps_calls_are_scoped_to_the_compose_project(self):
+        self.run_pass("05:00", managed="m1", extra={"PROJECT": "foo"})
+        ps_calls = self.ps_calls()
+        self.assertEqual(len(ps_calls), 2)
+        for call in ps_calls:
+            self.assertIn("label=com.docker.compose.project=foo", call)
+
+    def test_project_discovered_via_inspect(self):
+        self.run_pass("05:00", managed="m1", extra={"FAKE_INSPECT": "bar"})
+        ps_calls = self.ps_calls()
+        self.assertEqual(len(ps_calls), 2)
+        for call in ps_calls:
+            self.assertIn("label=com.docker.compose.project=bar", call)
+        inspects = [c for c in self.calls() if c.startswith("inspect")]
+        self.assertEqual(len(inspects), 1)
+        self.assertIn(socket.gethostname(), inspects[0])
+
+    def test_unknown_project_runs_unscoped_with_warning(self):
+        result = self.run_pass("05:00", managed="m1",
+                               extra={"FAKE_INSPECT_FAIL": "1"})
+        ps_calls = self.ps_calls()
+        self.assertEqual(len(ps_calls), 2)
+        for call in ps_calls:
+            self.assertNotIn("com.docker.compose.project", call)
+        self.assertIn("WARNING", result.stdout + result.stderr)
+        self.assertEqual(len(self.restarts()), 1)
+
+    def test_empty_ps_does_not_call_restart(self):
+        self.run_pass("05:00")
+        self.assertEqual(self.restarts(), [])
 
 
 if __name__ == "__main__":

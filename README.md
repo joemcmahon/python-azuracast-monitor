@@ -53,9 +53,11 @@ With Docker, keep `.env` on the host next to `docker-compose.yml`, then
 labelled `az-monitor.managed=true` once a day at `RESTART_AT` (Python's memory
 use grows in the SSE monitor, so a daily restart is a cheap fix), and restarts
 any such container whose healthcheck reports `unhealthy` (no data from
-AzuraCast within `HEARTBEAT_MAX_AGE`). If the restarter is created after
-today's restart time it records the day as done instead of restarting
-everything.
+AzuraCast within `HEARTBEAT_MAX_AGE`). When no marker exists and the restarter starts after
+today's restart time, it records the day as done instead of restarting
+everything. A marker that survives a container restart or host reboot means
+a later start can trigger one daily restart. The restarter only touches
+containers of its own compose project.
 
 # Multiple stations
 Other stations get a status board: one container per station that keeps a
@@ -79,12 +81,17 @@ The shortcodes, AutoDJ persona names and test-server host in
 `stations/*.env.example` are placeholders: confirm them on the test server.
 
 ## Test stack
-Run tests against a separate stack with its OWN webhooks (different `.env` and
-`stations/*.env` pointing at test channels) and its own project name, e.g.
-`docker compose -p az-test --profile secondary up -d --build`, from a checkout
-whose env files hold only test webhooks, so a test run cannot post to a
-production channel. Note the main service has a fixed `container_name`, so it
-cannot run twice on one host; use `DRY_RUN=1` or another host for that.
+Run a test stack on a DIFFERENT Docker host (daemon) than production, such as
+your test server, with its own `.env` and `stations/*.env` holding only test
+webhooks. Do not run it next to prod on the same daemon, for two reasons: the
+main service has a fixed `container_name: az-now-playing`, which would clash
+with the production container, and the restarter acts on containers it can
+see. The restarter now only touches containers of its own compose project (it
+adds `label=com.docker.compose.project=<project>` to its filters, reading its
+own project from its container labels), but that relies on the standard
+Compose project label and is unverified until run on a real Docker. On the
+test host, `docker compose -p <project> --profile secondary up -d --build`
+keeps separate stacks apart; use `-p <project>` on `down` too.
 
 # Migrating the existing production container
 The old main container got its webhook only from the `.env` baked into the old
