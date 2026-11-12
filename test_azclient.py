@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import json
+import os
 import urllib3
 
 from azclient import (
@@ -426,6 +427,35 @@ class TestWrongShortcodeWarning(unittest.TestCase):
                 with self.assertLogs("azclient", level="DEBUG") as cm:
                     run(_FakeClient([self._connect("station:other")]), Mock(), "mine")
             self.assertEqual(len(self._warnings(cm)), 1)
+
+
+class TestDebugPrint(unittest.TestCase):
+    def _channel(self):
+        np = {"live": {"is_live": False, "streamer_name": ""},
+              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
+                              "song": {"artist": "a", "title": "t",
+                                       "album": "b", "art": ""}}}
+        return json.dumps({"channel": "c", "pub": {"data": {"np": np}}})
+
+    def _printed(self, env):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with patch.dict("os.environ", env):
+            if "AZ_CLIENT_DEBUG" not in env:
+                os.environ.pop("AZ_CLIENT_DEBUG", None)
+            with contextlib.redirect_stdout(buf):
+                run(_FakeClient([self._channel()]), Mock(), "x")
+        return buf.getvalue()
+
+    def test_unset_does_not_print(self):
+        self.assertEqual(self._printed({}), "")
+
+    def test_empty_does_not_print(self):
+        self.assertEqual(self._printed({"AZ_CLIENT_DEBUG": ""}), "")
+
+    def test_set_prints(self):
+        self.assertNotEqual(self._printed({"AZ_CLIENT_DEBUG": "1"}), "")
 
 
 if __name__ == '__main__':

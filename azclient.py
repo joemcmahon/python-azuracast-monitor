@@ -276,6 +276,6 @@ def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME,
             if result is None:
                 logger.debug("No fallback metadata available; skipping event")
                 continue
-        if is_channel and os.getenv("AZ_CLIENT_DEBUG") != "":
+        if is_channel and os.getenv("AZ_CLIENT_DEBUG"):
             print(formatted_result(result))
         callback(result)

@@ -126,8 +126,14 @@ def main(environ=os.environ) -> int:
     logger.info(f"Connecting to {settings.station_server}/{settings.station_shortcode}")
 
     try:
-        sender = build_sender(settings)
-        hb = Heartbeat(heartbeat_path(settings.state_dir))
+        # Startup failures (sqlite, permissions, STATE_DIR) carry no webhook
+        # URL, so a full traceback is safe and useful here.
+        try:
+            sender = build_sender(settings)
+            hb = Heartbeat(heartbeat_path(settings.state_dir))
+        except Exception as e:
+            logger.error(f"Startup failed: {type(e).__name__}", exc_info=True)
+            return 1
         runner = ResilientRunner(
             settings.station_server,
             settings.station_shortcode,

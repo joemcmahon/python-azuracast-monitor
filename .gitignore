@@ -180,3 +180,4 @@ nohup.out
 stations/*.env
 state/
 *.sqlite3
+/heartbeat
