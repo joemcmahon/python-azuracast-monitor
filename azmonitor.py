@@ -8,25 +8,20 @@ from azclient import build_sse_client, run, NowPlayingResponse
 from resilient_runner import ResilientRunner
 from datetime import datetime
 from tzlocal import get_localzone
+from settings import Settings, SettingsError, load_settings
+from heartbeat import Heartbeat, heartbeat_path
+from status_board import StatusBoardStore, StatusBoardSender
 from logger_config import setup_logging, get_logger
-
-# Load environment variables
-load_dotenv()
 
 # Setup logging
 setup_logging()
 logger = get_logger(__name__)
 
-NOW_PLAYING_WEBHOOK = os.getenv('NOW_PLAYING_WEBHOOK')
 
-# Configuration
-STATION_SERVER = "spiral.radio"
-STATION_SHORTCODE = "radiospiral"
-
-def send_webhook(embed_data):
+def send_webhook(embed_data, webhook_url, timeout=10.0):
     """Send data to the Discord webhook."""
     try:
-        webhook = DiscordWebhook(url=NOW_PLAYING_WEBHOOK)
+        webhook = DiscordWebhook(url=webhook_url, timeout=timeout)
         embed = DiscordEmbed(
             title=embed_data['title'],
             description=embed_data['description'],
@@ -41,12 +36,16 @@ def send_webhook(embed_data):
         else:
             logger.error(f"Webhook failed: {response.status_code} {response.text}")
     except Exception as e:
-        logger.error(f"Failed to send webhook: {e}", exc_info=True)
+        # Type only: requests error text can embed the webhook URL.
+        logger.error(f"Failed to send webhook: {type(e).__name__}")
+
 
 class DiscordSender:
     """Stateful sender that tracks last response to avoid duplicates"""
 
-    def __init__(self):
+    def __init__(self, webhook_url, timeout=10.0):
+        self.webhook_url = webhook_url
+        self.timeout = timeout
         self.startup = True
         self.last_response = None
 
@@ -72,7 +71,7 @@ class DiscordSender:
         }
 
         # Send to webhook
-        send_webhook(embed_data)
+        send_webhook(embed_data, self.webhook_url, self.timeout)
 
         self.startup = False
         self.last_response = response
@@ -89,60 +88,66 @@ def signal_handler(signum, frame):
     shutdown_requested = True
 
 
-def validate_environment():
-    """Validate required environment variables are set"""
-    required_vars = {
-        'NOW_PLAYING_WEBHOOK': NOW_PLAYING_WEBHOOK,
-    }
+class DryRunSender:
+    """Logs what would be posted; never touches Discord or the status-board store."""
 
-    missing_vars = [name for name, value in required_vars.items() if not value]
+    def __init__(self, station_name):
+        self.station_name = station_name
 
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        logger.error("Please check your .env file")
-        sys.exit(1)
-
-    # Validate webhook URL format
-    if not NOW_PLAYING_WEBHOOK.startswith('https://discord.com/api/webhooks/'):
-        logger.error("NOW_PLAYING_WEBHOOK does not appear to be a valid Discord webhook URL")
-        sys.exit(1)
-
-    logger.info("Environment validation passed")
+    def send(self, response: NowPlayingResponse):
+        logger.info(f"[dry run] {self.station_name}: would post "
+                    f"{response.track} by {response.artist}")
 
 
-# Main function
-if __name__ == "__main__":
+def build_sender(settings: Settings):
+    """Choose the sender for the configured mode."""
+    if settings.dry_run:
+        return DryRunSender(settings.station_name)
+    if settings.status_board:
+        store = StatusBoardStore(os.path.join(settings.state_dir, "status_board.sqlite3"))
+        return StatusBoardSender(settings.webhook_url, settings.station_name,
+                                 store, settings.webhook_timeout)
+    return DiscordSender(settings.webhook_url, settings.webhook_timeout)
+
+
+def main(environ=os.environ) -> int:
+    load_dotenv()
+    try:
+        settings = load_settings(environ)
+    except SettingsError as e:
+        logger.error(f"Invalid configuration: {e}")
+        return 1
+
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     logger.info("Starting Azuracast Discord Monitor")
-
-    # Validate environment
-    validate_environment()
-
-    logger.info(f"Connecting to {STATION_SERVER}/{STATION_SHORTCODE}")
+    logger.info(f"Connecting to {settings.station_server}/{settings.station_shortcode}")
 
     try:
-        # Create the sender
-        sender = DiscordSender()
-
-        # Use resilient runner with automatic reconnection
+        sender = build_sender(settings)
+        hb = Heartbeat(heartbeat_path(settings.state_dir))
         runner = ResilientRunner(
-            server=STATION_SERVER,
-            shortcode=STATION_SHORTCODE,
-            callback=sender.send,
-            max_retries=None  # Infinite retries
+            settings.station_server,
+            settings.station_shortcode,
+            sender.send,
+            max_retries=None,  # Infinite retries
+            autodj_name=settings.autodj_name,
+            read_timeout=settings.sse_read_timeout,
+            on_event=hb.touch,
+            on_connect=hb.touch,
         )
-
-        exit_code = runner.run(shutdown_check=lambda: shutdown_requested)
-        sys.exit(exit_code)
-
+        return runner.run(shutdown_check=lambda: shutdown_requested)
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
-        sys.exit(0)
+        return 0
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+        logger.error(f"Fatal error: {type(e).__name__}", exc_info=False)
+        return 1
     finally:
         logger.info("Azuracast Discord Monitor stopped")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
