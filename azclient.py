@@ -212,6 +212,14 @@ def _np_from_payload(payload, station_key):
     return None, False
 
 
+def _has_subscription(payload, station_key):
+    """True if a connect payload's subs include station_key."""
+    try:
+        return station_key in payload['connect']['subs']
+    except (KeyError, TypeError):
+        return False
+
+
 def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME,
         on_event=None):
     """
@@ -238,6 +246,7 @@ def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME,
     loop; exceptions raised by the callback still propagate.
     """
     station_key = f"station:{shortcode}"
+    warned_missing_subscription = False
     for event in client.events():
         if on_event is not None:
             try:
@@ -249,6 +258,12 @@ def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME,
         except (ValueError, TypeError):
             logger.debug("Skipping SSE event with invalid JSON")
             continue
+        if (not warned_missing_subscription and isinstance(payload, dict)
+                and 'connect' in payload
+                and not _has_subscription(payload, station_key)):
+            warned_missing_subscription = True
+            logger.warning("connect payload has no subscription for %s; "
+                           "check STATION_SHORTCODE", station_key)
         np, is_channel = _np_from_payload(payload, station_key)
         if np is None:
             logger.debug("Skipping SSE event without usable now-playing data")

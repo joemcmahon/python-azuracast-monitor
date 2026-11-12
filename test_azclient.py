@@ -389,5 +389,44 @@ class TestRunOnEvent(unittest.TestCase):
         self.assertEqual(len(got), 2)
 
 
+class TestWrongShortcodeWarning(unittest.TestCase):
+    def _connect(self, key):
+        np = {"live": {"is_live": False, "streamer_name": ""},
+              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
+                              "song": {"artist": "a", "title": "t",
+                                       "album": "b", "art": ""}}}
+        return json.dumps({"connect": {"subs": {key: {"publications": [
+            {"data": {"np": np}}]}}}})
+
+    def _warnings(self, cm):
+        return [r for r in cm.records if r.levelname == "WARNING"]
+
+    def test_wrong_shortcode_warns_once_per_run(self):
+        datas = [self._connect("station:other"), self._connect("station:other")]
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertLogs("azclient", level="DEBUG") as cm:
+                run(_FakeClient(datas), Mock(), "mine")
+        warnings = self._warnings(cm)
+        self.assertEqual(len(warnings), 1)
+        msg = warnings[0].getMessage()
+        self.assertIn("station:mine", msg)
+        self.assertIn("STATION_SHORTCODE", msg)
+        self.assertNotIn("http", msg)
+
+    def test_correct_shortcode_does_not_warn(self):
+        got = []
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertNoLogs("azclient", level="WARNING"):
+                run(_FakeClient([self._connect("station:mine")]), got.append, "mine")
+        self.assertEqual(len(got), 1)
+
+    def test_second_run_can_warn_again(self):
+        for _ in range(2):
+            with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+                with self.assertLogs("azclient", level="DEBUG") as cm:
+                    run(_FakeClient([self._connect("station:other")]), Mock(), "mine")
+            self.assertEqual(len(self._warnings(cm)), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
