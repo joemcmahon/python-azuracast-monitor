@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import json
+import urllib3
 
 from azclient import (
     NowPlayingResponse,
@@ -266,27 +267,126 @@ class _Ev:
         self.data = data
 
 
-class _EventClient:
-    def __init__(self, events):
-        self._events = events
+class _FakeClient:
+    def __init__(self, datas):
+        self._datas = datas
 
     def events(self):
-        return iter(self._events)
+        return (_Ev(d) for d in self._datas)
+
+
+class TestRunResilience(unittest.TestCase):
+    def test_run_survives_bad_events(self):
+        good_np = {
+            "live": {"is_live": False, "streamer_name": ""},
+            "now_playing": {
+                "duration": 10, "elapsed": 1, "played_at": 1704110400,
+                "song": {"artist": "GA", "title": "GT", "album": "GAl",
+                         "art": ""},
+            },
+        }
+        bad_np = {"now_playing": {"song": {"title": "RawT", "artist": "RawA"}}}
+        datas = [
+            "not json",
+            json.dumps({}),
+            json.dumps({"connect": {}}),
+            json.dumps({"channel": "station:x",
+                        "pub": {"data": {"np": bad_np}}}),
+            json.dumps({"channel": "station:x",
+                        "pub": {"data": {"np": good_np}}}),
+        ]
+        got = []
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertLogs("azclient", level="DEBUG"):
+                run(_FakeClient(datas), got.append, "x")
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0].track, "RawT")
+        self.assertEqual(got[0].artist, "RawA")
+        self.assertEqual(got[1].track, "GT")
+
+    def test_callback_exceptions_propagate(self):
+        np = {"live": {"is_live": False, "streamer_name": ""},
+              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
+                              "song": {"artist": "a", "title": "t",
+                                       "album": "b", "art": ""}}}
+        data = json.dumps({"channel": "c", "pub": {"data": {"np": np}}})
+
+        def cb(_):
+            raise RuntimeError("boom")
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertRaises(RuntimeError):
+                run(_FakeClient([data]), cb, "x")
+
+
+class TestWithUrllib3(unittest.TestCase):
+    def _call(self, status, **kw):
+        with patch("urllib3.PoolManager") as pm:
+            resp = Mock(status=status)
+            pm.return_value.request.return_value = resp
+            try:
+                result = with_urllib3("https://example.invalid/x?secret=1", {}, **kw)
+            except SSEConnectionError:
+                self.resp = resp
+                self.pm = pm
+                raise
+        self.resp = resp
+        self.pm = pm
+        return result
+
+    def test_non_200_raises_without_url(self):
+        for status in (503, 404):
+            with self.assertRaises(SSEConnectionError) as cm:
+                self._call(status)
+            self.assertIn(str(status), str(cm.exception))
+            self.assertNotIn("example.invalid", str(cm.exception))
+            self.assertNotIn("secret", str(cm.exception))
+            self.resp.release_conn.assert_called_once()
+
+    def test_200_returns_response(self):
+        result = self._call(200)
+        self.assertIs(result, self.resp)
+
+    def test_timeout_arguments_reach_pool_manager(self):
+        self._call(200, timeout=11, read_timeout=77)
+        t = self.pm.call_args.kwargs["timeout"]
+        self.assertIsInstance(t, urllib3.Timeout)
+        self.assertEqual(t.connect_timeout, 11)
+        self.assertEqual(t.read_timeout, 77)
+
+    def test_timeout_defaults(self):
+        self._call(200)
+        t = self.pm.call_args.kwargs["timeout"]
+        self.assertEqual(t.connect_timeout, 30)
+        self.assertEqual(t.read_timeout, 300)
 
 
 class TestRunOnEvent(unittest.TestCase):
-    def test_on_event_called_per_event(self):
-        client = _EventClient([_Ev("{}"), _Ev("not json"), _Ev('{"x": 1}')])
+    def _valid(self):
+        np = {"live": {"is_live": False, "streamer_name": ""},
+              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
+                              "song": {"artist": "a", "title": "t",
+                                       "album": "b", "art": ""}}}
+        return json.dumps({"channel": "c", "pub": {"data": {"np": np}}})
+
+    def test_on_event_called_once_per_event(self):
+        got = []
         on_event = Mock()
-        run(client, Mock(), "sc", on_event=on_event)
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            run(_FakeClient(["{}", "not json", self._valid()]), got.append,
+                "x", on_event=on_event)
         self.assertEqual(on_event.call_count, 3)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].track, "t")
 
     def test_on_event_exception_ignored(self):
-        client = _EventClient([_Ev("{}"), _Ev("{}")])
         on_event = Mock(side_effect=RuntimeError("x"))
-        with self.assertLogs("azclient", level="ERROR"):
-            run(client, Mock(), "sc", on_event=on_event)
+        got = []
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertLogs("azclient", level="ERROR"):
+                run(_FakeClient([self._valid(), self._valid()]), got.append,
+                    "x", on_event=on_event)
         self.assertEqual(on_event.call_count, 2)
+        self.assertEqual(len(got), 2)
 
 
 if __name__ == '__main__':

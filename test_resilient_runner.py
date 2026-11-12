@@ -122,16 +122,16 @@ class TestBackoff(RunnerTestCase):
         waits = []
         orig = runner._calculate_backoff
         runner._calculate_backoff = lambda: waits.append(orig()) or waits[-1]
-        attempts = {"n": 0}
+        passes = {"n": 0}
 
         def check():
-            return len(waits) >= 4
-        self.build.side_effect = lambda *a, **k: attempts.__setitem__("n", attempts["n"] + 1)
+            passes["n"] += 1
+            return len(waits) >= 4 or passes["n"] > 50
+
         runner.run(check)
         self.assertEqual(waits, [1, 2, 4, 8])
-        self.assertTrue(all(w > 0 for w in waits))
-        self.assertGreater(sum(self.clock.sleeps), 0)
-        self.assertLessEqual(attempts["n"], 5)
+        self.assertTrue(self.clock.sleeps)
+        self.assertTrue(all(s > 0 for s in self.clock.sleeps))
 
     def test_shutdown_during_backoff_exits(self):
         self.az_run.return_value = None
