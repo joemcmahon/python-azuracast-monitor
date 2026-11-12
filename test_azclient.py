@@ -14,7 +14,9 @@ from azclient import (
     convert,
     construct_sse_url,
     extract_metadata,
-    formatted_result
+    fallback_metadata,
+    formatted_result,
+    run,
 )
 
 
@@ -207,6 +209,110 @@ class TestFormattedResult(unittest.TestCase):
         self.assertIn("Track", result)
         self.assertIn("Artist", result)
         self.assertNotIn('on ""', result)
+
+
+class TestTitleSplitAndAutoDJ(unittest.TestCase):
+    def setUp(self):
+        self.np = {
+            "live": {"is_live": False, "streamer_name": ""},
+            "now_playing": {
+                "duration": 225, "elapsed": 80, "played_at": 1704110400,
+                "song": {"artist": "A", "title": "Track", "album": "",
+                         "art": ""},
+            },
+        }
+
+    def test_three_part_title_with_empty_album(self):
+        self.np["now_playing"]["song"]["title"] = "Artist - Track - Remix"
+        result = extract_metadata(self.np)
+        self.assertEqual(result.track, "Artist - Track")
+        self.assertEqual(result.album, "Remix")
+
+    def test_two_part_title_unchanged(self):
+        self.np["now_playing"]["song"]["title"] = "Track - Album"
+        result = extract_metadata(self.np)
+        self.assertEqual(result.track, "Track")
+        self.assertEqual(result.album, "Album")
+
+    def test_autodj_name_is_configurable(self):
+        self.assertEqual(extract_metadata(self.np).dj, "Spud the Ambient Robot")
+        self.assertEqual(
+            extract_metadata(self.np, autodj_name="Robot X").dj, "Robot X")
+
+
+class TestFallbackMetadata(unittest.TestCase):
+    def test_fallback_metadata_uses_raw_fields(self):
+        np = {"now_playing": {"song": {"title": "T - X", "artist": "Art"}}}
+        r = fallback_metadata(np, autodj_name="Bot")
+        self.assertEqual(r.track, "T - X")
+        self.assertEqual(r.artist, "Art")
+        self.assertEqual(r.album, "")
+        self.assertEqual(r.artURL, "")
+        self.assertEqual(r.duration, "00:00:00")
+        self.assertEqual(r.dj, "Bot")
+        self.assertIsInstance(r.start, datetime)
+
+    def test_fallback_metadata_none_without_title_or_artist(self):
+        self.assertIsNone(fallback_metadata({"now_playing": {"song": {}}}))
+        self.assertIsNone(fallback_metadata({}))
+        self.assertIsNone(fallback_metadata("nope"))
+        self.assertIsNone(fallback_metadata(None))
+
+
+class _Ev:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeClient:
+    def __init__(self, datas):
+        self._datas = datas
+
+    def events(self):
+        return (_Ev(d) for d in self._datas)
+
+
+class TestRunResilience(unittest.TestCase):
+    def test_run_survives_bad_events(self):
+        good_np = {
+            "live": {"is_live": False, "streamer_name": ""},
+            "now_playing": {
+                "duration": 10, "elapsed": 1, "played_at": 1704110400,
+                "song": {"artist": "GA", "title": "GT", "album": "GAl",
+                         "art": ""},
+            },
+        }
+        bad_np = {"now_playing": {"song": {"title": "RawT", "artist": "RawA"}}}
+        datas = [
+            "not json",
+            json.dumps({}),
+            json.dumps({"connect": {}}),
+            json.dumps({"channel": "station:x",
+                        "pub": {"data": {"np": bad_np}}}),
+            json.dumps({"channel": "station:x",
+                        "pub": {"data": {"np": good_np}}}),
+        ]
+        got = []
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertLogs("azclient", level="DEBUG"):
+                run(_FakeClient(datas), got.append, "x")
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0].track, "RawT")
+        self.assertEqual(got[0].artist, "RawA")
+        self.assertEqual(got[1].track, "GT")
+
+    def test_callback_exceptions_propagate(self):
+        np = {"live": {"is_live": False, "streamer_name": ""},
+              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
+                              "song": {"artist": "a", "title": "t",
+                                       "album": "b", "art": ""}}}
+        data = json.dumps({"channel": "c", "pub": {"data": {"np": np}}})
+
+        def cb(_):
+            raise RuntimeError("boom")
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertRaises(RuntimeError):
+                run(_FakeClient([data]), cb, "x")
 
 
 if __name__ == '__main__':
