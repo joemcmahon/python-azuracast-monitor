@@ -47,6 +47,17 @@ class SenderTests(unittest.TestCase):
         plain = azmonitor.build_sender(settings_for(self.tmp))
         self.assertIsInstance(plain, azmonitor.DiscordSender)
 
+    def test_build_sender_passes_webhook_timeout(self):
+        board = azmonitor.build_sender(settings_for(
+            self.tmp, STATUS_BOARD="true", STATUS_BOARD_WEBHOOK=WEBHOOK,
+            WEBHOOK_TIMEOUT="7.5"))
+        self.assertEqual(board.timeout, 7.5)
+        plain = azmonitor.build_sender(settings_for(self.tmp, WEBHOOK_TIMEOUT="3.5"))
+        with mock.patch.object(azmonitor, "DiscordWebhook") as wh:
+            wh.return_value.execute.return_value.status_code = 200
+            plain.send(make_response())
+        wh.assert_called_once_with(url=WEBHOOK, timeout=3.5)
+
     def test_dry_run_in_status_board_mode_is_dry(self):
         s = azmonitor.build_sender(settings_for(
             self.tmp, STATUS_BOARD="true", DRY_RUN="1"))
@@ -124,6 +135,27 @@ class MainTests(unittest.TestCase):
         os.remove(hb)
         kwargs["on_connect"]()
         self.assertTrue(os.path.exists(hb))
+
+    def test_failure_building_sender_logs_traceback(self):
+        env = {"NOW_PLAYING_WEBHOOK": WEBHOOK, "STATE_DIR": self.tmp}
+        with mock.patch.object(azmonitor, "build_sender",
+                               side_effect=PermissionError("/state nope")), \
+                mock.patch.object(azmonitor, "ResilientRunner") as runner, \
+                self.assertLogs(azmonitor.logger, level="ERROR") as cm:
+            self.assertEqual(azmonitor.main(env), 1)
+        runner.assert_not_called()
+        self.assertTrue(any(r.exc_info for r in cm.records))
+        self.assertIn("PermissionError", "\n".join(cm.output))
+
+    def test_failure_from_runner_stays_type_only(self):
+        env = {"NOW_PLAYING_WEBHOOK": WEBHOOK, "STATE_DIR": self.tmp}
+        with mock.patch.object(azmonitor, "ResilientRunner") as runner, \
+                self.assertLogs(azmonitor.logger, level="ERROR") as cm:
+            runner.return_value.run.side_effect = RuntimeError(WEBHOOK)
+            self.assertEqual(azmonitor.main(env), 1)
+        self.assertFalse(any(r.exc_info for r in cm.records))
+        self.assertIn("RuntimeError", "\n".join(cm.output))
+        self.assertNotIn("SECRETTOKEN", "\n".join(cm.output))
 
 
 if __name__ == "__main__":
