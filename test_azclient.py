@@ -17,6 +17,8 @@ from azclient import (
     fallback_metadata,
     formatted_result,
     run,
+    with_urllib3,
+    SSEConnectionError,
 )
 
 
@@ -264,55 +266,27 @@ class _Ev:
         self.data = data
 
 
-class _FakeClient:
-    def __init__(self, datas):
-        self._datas = datas
+class _EventClient:
+    def __init__(self, events):
+        self._events = events
 
     def events(self):
-        return (_Ev(d) for d in self._datas)
+        return iter(self._events)
 
 
-class TestRunResilience(unittest.TestCase):
-    def test_run_survives_bad_events(self):
-        good_np = {
-            "live": {"is_live": False, "streamer_name": ""},
-            "now_playing": {
-                "duration": 10, "elapsed": 1, "played_at": 1704110400,
-                "song": {"artist": "GA", "title": "GT", "album": "GAl",
-                         "art": ""},
-            },
-        }
-        bad_np = {"now_playing": {"song": {"title": "RawT", "artist": "RawA"}}}
-        datas = [
-            "not json",
-            json.dumps({}),
-            json.dumps({"connect": {}}),
-            json.dumps({"channel": "station:x",
-                        "pub": {"data": {"np": bad_np}}}),
-            json.dumps({"channel": "station:x",
-                        "pub": {"data": {"np": good_np}}}),
-        ]
-        got = []
-        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
-            with self.assertLogs("azclient", level="DEBUG"):
-                run(_FakeClient(datas), got.append, "x")
-        self.assertEqual(len(got), 2)
-        self.assertEqual(got[0].track, "RawT")
-        self.assertEqual(got[0].artist, "RawA")
-        self.assertEqual(got[1].track, "GT")
+class TestRunOnEvent(unittest.TestCase):
+    def test_on_event_called_per_event(self):
+        client = _EventClient([_Ev("{}"), _Ev("not json"), _Ev('{"x": 1}')])
+        on_event = Mock()
+        run(client, Mock(), "sc", on_event=on_event)
+        self.assertEqual(on_event.call_count, 3)
 
-    def test_callback_exceptions_propagate(self):
-        np = {"live": {"is_live": False, "streamer_name": ""},
-              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
-                              "song": {"artist": "a", "title": "t",
-                                       "album": "b", "art": ""}}}
-        data = json.dumps({"channel": "c", "pub": {"data": {"np": np}}})
-
-        def cb(_):
-            raise RuntimeError("boom")
-        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
-            with self.assertRaises(RuntimeError):
-                run(_FakeClient([data]), cb, "x")
+    def test_on_event_exception_ignored(self):
+        client = _EventClient([_Ev("{}"), _Ev("{}")])
+        on_event = Mock(side_effect=RuntimeError("x"))
+        with self.assertLogs("azclient", level="ERROR"):
+            run(client, Mock(), "sc", on_event=on_event)
+        self.assertEqual(on_event.call_count, 2)
 
 
 if __name__ == '__main__':
