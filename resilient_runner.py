@@ -10,6 +10,10 @@ from settings import DEFAULT_AUTODJ_NAME
 logger = logging.getLogger(__name__)
 
 
+# Minimum pause (seconds) after any normal connection close.
+CLEAN_CLOSE_FLOOR = 1.0
+
+
 class ResilientRunner:
     """
     Wraps the SSE client with automatic reconnection and exponential backoff
@@ -127,6 +131,12 @@ class ResilientRunner:
                 # If we get here, the connection closed normally
                 logger.warning("SSE connection closed")
                 if delivered:
+                    # Healthy connection (backoff already reset), but never
+                    # reconnect in a tight loop. Sleep in short slices; the
+                    # loop-top shutdown check runs right after the floor.
+                    start_time = time.time()
+                    while time.time() - start_time < CLEAN_CLOSE_FLOOR:
+                        time.sleep(0.5)
                     continue
 
                 # Closed without a single event: treat as a failed attempt

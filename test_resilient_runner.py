@@ -144,5 +144,33 @@ class TestBackoff(RunnerTestCase):
         self.assertEqual(runner.run(check), 0)
 
 
+class TestCleanCloseFloor(RunnerTestCase):
+    def test_clean_close_after_events_waits_at_least_one_second(self):
+        self.az_run.side_effect = lambda *a, **k: k["on_event"]()
+        r = ResilientRunner("s", "c", print)
+        r.run(self.shutdown_after(3))
+        self.assertEqual(self.build.call_count, 3)
+        self.assertGreaterEqual(sum(self.clock.sleeps), 3.0)
+        # one floor per close, not a growing backoff
+        self.assertLessEqual(sum(self.clock.sleeps), 3.0 + 0.001)
+
+    def test_event_then_clean_close_still_resets_backoff(self):
+        outcomes = iter(["fail", "fail", "event_close", "fail"])
+
+        def fake_run(client, cb, code, **k):
+            o = next(outcomes)
+            if o == "event_close":
+                k["on_event"]()
+                return None
+            raise RuntimeError("boom")
+        self.az_run.side_effect = fake_run
+        runner = ResilientRunner("s", "c", print)
+        waits = []
+        orig = runner._calculate_backoff
+        runner._calculate_backoff = lambda: waits.append(orig()) or waits[-1]
+        runner.run(lambda: len(waits) >= 3)
+        self.assertEqual(waits, [1, 2, 1])
+
+
 if __name__ == "__main__":
     unittest.main()
