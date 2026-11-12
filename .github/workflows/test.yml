@@ -22,7 +22,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Check imports
-        run: python -c "import azmonitor, azclient, resilient_runner, logger_config"
+        run: python -c "import azmonitor, azclient, resilient_runner, logger_config, settings, heartbeat, status_board"
 
       - name: Run tests
-        run: python -m unittest -v test_azclient
+        run: python -m unittest discover -v
