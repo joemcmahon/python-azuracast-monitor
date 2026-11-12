@@ -1,0 +1,8 @@
+# Never bake secrets, local state or tooling into the image.
+.env
+.venv
+.git
+__pycache__
+*.log
+state/
+stations/*.env

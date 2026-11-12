@@ -175,3 +175,8 @@ cython_debug/
 
 # nohup output
 nohup.out
+
+# Station status-board containers and local state
+stations/*.env
+state/
+*.sqlite3
