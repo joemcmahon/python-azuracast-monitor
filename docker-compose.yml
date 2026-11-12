@@ -1,23 +1,55 @@
+# env_file is set per service on purpose. A service-level env_file replaces any
+# value merged in from an x- block (lists are not concatenated), so each
+# status-board service names ONLY its own stations/<name>.env. The main .env
+# holds the main channel's webhook and must never reach a status-board container.
+
+x-az-monitor-base: &az-monitor-base
+  build: .
+  image: az-now-playing:latest
+  restart: unless-stopped
+  labels:
+    az-monitor.managed: "true"
+  healthcheck:
+    test: ["CMD", "python", "healthcheck.py"]
+    interval: 60s
+    timeout: 10s
+    retries: 3
+    start_period: 60s
+  environment:
+    STATE_DIR: /state
+
+x-az-monitor-secondary: &az-monitor-secondary
+  <<: *az-monitor-base
+  profiles: [secondary]
+
 services:
 
   az-now-playing:
-    image: az-now-playing:latest
+    <<: *az-monitor-base
     container_name: az-now-playing
-    restart: unless-stopped
+    env_file: [.env]
+    volumes: ["./state/radiospiral:/state"]
 
+  status-pulse:
+    <<: *az-monitor-secondary
+    env_file: [stations/pulse.env]
+    volumes: ["./state/pulse:/state"]
+
+  status-inner:
+    <<: *az-monitor-secondary
+    env_file: [stations/inner.env]
+    volumes: ["./state/inner:/state"]
+
+  status-outer:
+    <<: *az-monitor-secondary
+    env_file: [stations/outer.env]
+    volumes: ["./state/outer:/state"]
+
+  # Deliberately NOT labelled az-monitor.managed: it must not restart itself.
   restarter:
     image: docker:cli
     restart: unless-stopped
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
-    entrypoint: ["/bin/sh","-c"]
-    command:
-      - |
-        while true; do
-          current_epoch=$$(date +%s)
-          target_epoch=$$(( $$(date -d "05:00" +%s) + 86400 ))
-          sleep_seconds=$$(( target_epoch - current_epoch ))
-          echo "$$(date) + $$sleep_seconds seconds"
-          sleep $$sleep_seconds
-          
-          docker restart az-now-playing
-        done
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./restarter.sh:/restarter.sh:ro
+    entrypoint: ["/bin/sh", "/restarter.sh"]
