@@ -95,13 +95,42 @@ keeps separate stacks apart; use `-p <project>` on `down` too.
 
 # Migrating the existing production container
 The old main container got its webhook only from the `.env` baked into the old
-image. That image no longer contains `.env`, so:
+image. That image no longer contains `.env`, so follow these steps in order:
 
 1. Keep `.env` on the host next to `docker-compose.yml`; it must hold
    `NOW_PLAYING_WEBHOOK`. Compose loads it through `env_file` before the
-   first rebuild.
-2. Run `docker compose up -d --build --remove-orphans`. Compose recreates the
-   same-named `restarter` service in place; do not stop it by hand.
+   first rebuild. Write it as plain `KEY=value` lines: Compose's `env_file`
+   parser is not python-dotenv, so no `export`, quotes are handled
+   differently, and no inline comments. A mis-parsed webhook means an exit-1
+   restart loop and no now-playing posts.
+2. Tag the working image BEFORE building, because the build overwrites
+   `az-now-playing:latest` and the old Dockerfile cannot be rebuilt without
+   `.env` in the build context:
+   `docker tag az-now-playing:latest az-now-playing:pre-multistation`
+3. If `az-now-playing` was not created by this compose project, the fixed
+   `container_name` will conflict. After tagging the image (step 2), remove it
+   first: `docker rm -f az-now-playing`.
+4. Run `docker compose up -d --build`. Compose recreates the same-named
+   `restarter` service in place; do not stop it by hand. Do not add
+   `--remove-orphans`: no service was renamed or removed, and the flag also
+   removes any other container in the same compose project. Use it only if you
+   later remove a service from `docker-compose.yml`.
+5. Verify: `docker compose ps` should show the containers healthy (allow the
+   60s start period), and `docker logs az-now-playing` must not contain
+   "Invalid configuration".
+6. Rollback: `docker compose down`, then
+   `docker tag az-now-playing:pre-multistation az-now-playing:latest` and
+   start the old container from that image with its old run command (the old
+   image carries its own `.env`).
+
+Notes:
+- Every restart, including the daily one, re-posts the current track once in
+  main mode.
+- Every later deploy must also pass `--profile secondary` (or set
+  `COMPOSE_PROFILES=secondary`); without it the status containers keep
+  running the old image.
+- The status-board store is keyed by `STATION_NAME`, so renaming a station
+  orphans its old message.
 
 # Not yet verified
 Written without Docker available. Unverified until run on a real Docker host:
@@ -109,3 +138,7 @@ compose profiles, the label and health filters in the restarter against a real
 daemon, `docker compose config`, and webhook edits (and 404 on a deleted
 message) against Discord. The restarter's logic is tested with a fake
 `docker` command (`test_restarter.py`).
+
+Also unverified: whether `docker compose up` WITHOUT `--profile secondary`
+fails when `stations/*.env` do not exist (production will be in that state at
+the first step). Test that first on the test server before touching prod.
