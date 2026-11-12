@@ -4,7 +4,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Tuple
 
 from discord_webhook import DiscordWebhook, DiscordEmbed
 from tzlocal import get_localzone
@@ -84,6 +84,29 @@ class StatusBoardSender:
         self.store = store
         self.timeout = timeout
         self._factory = webhook_factory
+        # Last (message_id, last_value) we successfully posted/edited. Used when
+        # the store has no row or fails, so a broken disk cannot cause a flood
+        # of new messages.
+        self._memory: Optional[Tuple[str, str]] = None
+
+    def _load(self) -> Optional[Tuple[str, str]]:
+        try:
+            stored = self.store.get(self.station_name)
+        except Exception as e:
+            logger.error("Status board store read failed for %s: %s",
+                         self.station_name, type(e).__name__)
+            return self._memory
+        if stored is not None and stored.message_id:
+            return (stored.message_id, stored.last_value)
+        return self._memory
+
+    def _remember(self, message_id: str, value: str) -> None:
+        self._memory = (message_id, value)
+        try:
+            self.store.save(self.station_name, message_id, value)
+        except Exception as e:
+            logger.error("Status board store write failed for %s: %s",
+                         self.station_name, type(e).__name__)
 
     def _build(self, response, message_id=None):
         kwargs = {"url": self._url, "timeout": self.timeout}
@@ -102,7 +125,7 @@ class StatusBoardSender:
         webhook = self._build(response)
         result = webhook.execute()
         if result.status_code in (200, 204) and isinstance(webhook.id, str):
-            self.store.save(self.station_name, webhook.id, value)
+            self._remember(webhook.id, value)
             logger.info("Status board posted for %s", self.station_name)
         else:
             logger.error("Status board post failed for %s: HTTP %s",
@@ -112,16 +135,17 @@ class StatusBoardSender:
         # Exception messages are never logged: requests errors can embed the URL.
         try:
             value = status_value(response)
-            stored = self.store.get(self.station_name)
-            if stored is not None and stored.last_value == value:
+            known = self._load()
+            if known is not None and known[1] == value:
                 logger.debug("Status board unchanged for %s", self.station_name)
                 return
-            if stored is None or not stored.message_id:
+            if known is None:
                 self._post(response, value)
                 return
-            result = self._build(response, stored.message_id).edit()
+            message_id = known[0]
+            result = self._build(response, message_id).edit()
             if result.status_code in (200, 204):
-                self.store.save(self.station_name, stored.message_id, value)
+                self._remember(message_id, value)
                 logger.info("Status board edited for %s", self.station_name)
             elif result.status_code == 404:
                 logger.warning("Status board message for %s was deleted; reposting",

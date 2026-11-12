@@ -1,5 +1,6 @@
 import logging
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -202,6 +203,87 @@ class StatusBoardTests(unittest.TestCase):
         output = "\n".join(cm.output)
         self.assertNotIn(URL, output)
         self.assertNotIn("SECRET-TOKEN", output)
+
+
+class FailingStore:
+    """Wraps a real store; selected operations raise like a broken disk would."""
+    def __init__(self, inner, fail_get=False, fail_save=False):
+        self.inner = inner
+        self.fail_get = fail_get
+        self.fail_save = fail_save
+
+    def get(self, station):
+        if self.fail_get:
+            raise sqlite3.OperationalError(f"disk I/O error for {URL}")
+        return self.inner.get(station)
+
+    def save(self, station, message_id, last_value):
+        if self.fail_save:
+            raise sqlite3.OperationalError(f"readonly database for {URL}")
+        return self.inner.save(station, message_id, last_value)
+
+
+class StoreFailureTests(unittest.TestCase):
+    def setUp(self):
+        FakeWebhook.instances = []
+        FakeWebhook.post_results = [FakeResponse(200, "msg1")]
+        FakeWebhook.edit_results = [FakeResponse(200) for _ in range(10)]
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.inner = StatusBoardStore(os.path.join(self._tmp.name, "b.db"))
+
+    def sender(self, **kw):
+        return StatusBoardSender(URL, "Station X", FailingStore(self.inner, **kw),
+                                 webhook_factory=FakeWebhook)
+
+    def posts(self):
+        return [w for w in FakeWebhook.instances if "execute" in w.calls]
+
+    def edits(self):
+        return [w for w in FakeWebhook.instances if "edit" in w.calls]
+
+    def check_one_post_rest_edits(self, sender, n=5):
+        for i in range(n):
+            sender.send(make_response(track=f"T{i}"))
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual(len(self.edits()), n - 1)
+        for w in self.edits():
+            self.assertEqual(w.kwargs["id"], "msg1")
+
+    def test_save_failure_still_edits_one_message(self):
+        with self.assertLogs("status_board", level=logging.DEBUG):
+            self.check_one_post_rest_edits(self.sender(fail_save=True))
+
+    def test_get_and_save_failure_still_edits_one_message(self):
+        with self.assertLogs("status_board", level=logging.DEBUG):
+            self.check_one_post_rest_edits(self.sender(fail_get=True, fail_save=True))
+
+    def test_same_track_not_resent_when_store_broken(self):
+        s = self.sender(fail_get=True, fail_save=True)
+        with self.assertLogs("status_board", level=logging.DEBUG):
+            s.send(make_response())
+            s.send(make_response())
+        self.assertEqual(len(FakeWebhook.instances), 1)
+
+    def test_distinct_store_failure_logs_without_url(self):
+        with self.assertLogs("status_board", level=logging.DEBUG) as cm:
+            s = self.sender(fail_get=True, fail_save=True)
+            s.send(make_response())
+            s.send(make_response(track="Two"))
+        out = "\n".join(cm.output)
+        self.assertIn("store write failed", out)
+        self.assertIn("store read failed", out)
+        self.assertIn("OperationalError", out)
+        self.assertNotIn(URL, out)
+        self.assertNotIn("SECRET-TOKEN", out)
+        self.assertNotIn("disk I/O", out)
+
+    def test_healthy_store_logs_no_store_failure(self):
+        with self.assertLogs("status_board", level=logging.DEBUG) as cm:
+            s = self.sender()
+            s.send(make_response())
+            s.send(make_response(track="Two"))
+        self.assertNotIn("store", "\n".join(cm.output).replace("Status board", ""))
 
 
 if __name__ == "__main__":
