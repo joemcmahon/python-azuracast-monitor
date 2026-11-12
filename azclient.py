@@ -53,27 +53,41 @@ def convert(seconds):
     seconds %= 60
     return f"{hours:02}:{minutes:02}:{seconds:02}"
 
-def with_urllib3(url, headers, timeout=30):
+class SSEConnectionError(Exception):
+    """Raised when the SSE endpoint answers with a non-200 HTTP status."""
+
+
+def with_urllib3(url, headers, timeout=30, read_timeout=300):
     """Get a streaming response for the given event feed using urllib3.
 
     Args:
         url: The SSE endpoint URL
         headers: HTTP headers for the request
         timeout: Connection timeout in seconds (default: 30)
+        read_timeout: Read timeout in seconds (default: 300)
 
     Returns:
         urllib3 HTTPResponse object
 
     Raises:
+        SSEConnectionError: On any HTTP status other than 200
         urllib3.exceptions.HTTPError: On HTTP errors
         urllib3.exceptions.TimeoutError: On timeout
     """
     import urllib3
     http = urllib3.PoolManager(
-        timeout=urllib3.Timeout(connect=timeout, read=300),
+        timeout=urllib3.Timeout(connect=timeout, read=read_timeout),
         retries=False  # We'll handle retries at a higher level
     )
-    return http.request('GET', url, preload_content=False, headers=headers)
+    response = http.request('GET', url, preload_content=False, headers=headers)
+    if response.status != 200:
+        status = response.status
+        try:
+            response.release_conn()
+        except Exception:
+            pass
+        raise SSEConnectionError(f"SSE endpoint returned HTTP {status}")
+    return response
 
 def construct_sse_url(server, shortcode):
     """Builds out an Azuracast SSE URL.
@@ -94,10 +108,11 @@ def construct_sse_url(server, shortcode):
     baseURL = f"https://{server}"
     return f"{baseURL}/api/live/nowplaying/sse?cf_connect={encoded_query}"
 
-def build_sse_client(server, shortcode):
+def build_sse_client(server, shortcode, read_timeout=300):
     """Constructs an SSE client for the given server and shortcode."""
     headers = {'Accept': 'text/event-stream'}
-    response = with_urllib3(construct_sse_url(server, shortcode), headers)
+    response = with_urllib3(construct_sse_url(server, shortcode), headers,
+                           read_timeout=read_timeout)
     return sseclient.SSEClient(response)
 
 def formatted_result(result):
@@ -197,7 +212,8 @@ def _np_from_payload(payload, station_key):
     return None, False
 
 
-def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME):
+def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME,
+        on_event=None):
     """
     Runs the client created by build_sse_client and
     makes a callback to the function of your choice
@@ -208,6 +224,8 @@ def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME):
         callback: Function to call with each NowPlayingResponse
         shortcode: Station shortcode (must match the one used in build_sse_client)
         autodj_name: Name reported as the DJ when no live streamer is on
+        on_event: Optional no-argument function called first for every received
+            event, before parsing. Exceptions it raises are logged and ignored.
 
     Example:
         client = build_sse_client("spiral.radio", "radiospiral")
@@ -221,6 +239,11 @@ def run(client, callback, shortcode, autodj_name=DEFAULT_AUTODJ_NAME):
     """
     station_key = f"station:{shortcode}"
     for event in client.events():
+        if on_event is not None:
+            try:
+                on_event()
+            except Exception:
+                logger.exception("on_event hook failed; ignoring")
         try:
             payload = json.loads(event.data)
         except (ValueError, TypeError):

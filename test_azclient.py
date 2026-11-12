@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import json
+import urllib3
 
 from azclient import (
     NowPlayingResponse,
@@ -17,6 +18,8 @@ from azclient import (
     fallback_metadata,
     formatted_result,
     run,
+    with_urllib3,
+    SSEConnectionError,
 )
 
 
@@ -313,6 +316,77 @@ class TestRunResilience(unittest.TestCase):
         with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
             with self.assertRaises(RuntimeError):
                 run(_FakeClient([data]), cb, "x")
+
+
+class TestWithUrllib3(unittest.TestCase):
+    def _call(self, status, **kw):
+        with patch("urllib3.PoolManager") as pm:
+            resp = Mock(status=status)
+            pm.return_value.request.return_value = resp
+            try:
+                result = with_urllib3("https://example.invalid/x?secret=1", {}, **kw)
+            except SSEConnectionError:
+                self.resp = resp
+                self.pm = pm
+                raise
+        self.resp = resp
+        self.pm = pm
+        return result
+
+    def test_non_200_raises_without_url(self):
+        for status in (503, 404):
+            with self.assertRaises(SSEConnectionError) as cm:
+                self._call(status)
+            self.assertIn(str(status), str(cm.exception))
+            self.assertNotIn("example.invalid", str(cm.exception))
+            self.assertNotIn("secret", str(cm.exception))
+            self.resp.release_conn.assert_called_once()
+
+    def test_200_returns_response(self):
+        result = self._call(200)
+        self.assertIs(result, self.resp)
+
+    def test_timeout_arguments_reach_pool_manager(self):
+        self._call(200, timeout=11, read_timeout=77)
+        t = self.pm.call_args.kwargs["timeout"]
+        self.assertIsInstance(t, urllib3.Timeout)
+        self.assertEqual(t.connect_timeout, 11)
+        self.assertEqual(t.read_timeout, 77)
+
+    def test_timeout_defaults(self):
+        self._call(200)
+        t = self.pm.call_args.kwargs["timeout"]
+        self.assertEqual(t.connect_timeout, 30)
+        self.assertEqual(t.read_timeout, 300)
+
+
+class TestRunOnEvent(unittest.TestCase):
+    def _valid(self):
+        np = {"live": {"is_live": False, "streamer_name": ""},
+              "now_playing": {"duration": 1, "elapsed": 0, "played_at": 1,
+                              "song": {"artist": "a", "title": "t",
+                                       "album": "b", "art": ""}}}
+        return json.dumps({"channel": "c", "pub": {"data": {"np": np}}})
+
+    def test_on_event_called_once_per_event(self):
+        got = []
+        on_event = Mock()
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            run(_FakeClient(["{}", "not json", self._valid()]), got.append,
+                "x", on_event=on_event)
+        self.assertEqual(on_event.call_count, 3)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].track, "t")
+
+    def test_on_event_exception_ignored(self):
+        on_event = Mock(side_effect=RuntimeError("x"))
+        got = []
+        with patch.dict("os.environ", {"AZ_CLIENT_DEBUG": ""}):
+            with self.assertLogs("azclient", level="ERROR"):
+                run(_FakeClient([self._valid(), self._valid()]), got.append,
+                    "x", on_event=on_event)
+        self.assertEqual(on_event.call_count, 2)
+        self.assertEqual(len(got), 2)
 
 
 if __name__ == '__main__':
