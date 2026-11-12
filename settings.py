@@ -1,6 +1,6 @@
 """Environment-driven settings, read and validated in one place (stdlib only)."""
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
 DEFAULT_AUTODJ_NAME = "Spud the Ambient Robot"
@@ -21,7 +21,7 @@ class Settings:
     station_name: str
     autodj_name: str
     status_board: bool
-    webhook_url: str
+    webhook_url: str = field(repr=False)
     state_dir: str
     webhook_timeout: float
     sse_read_timeout: float

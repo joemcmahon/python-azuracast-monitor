@@ -73,6 +73,13 @@ class LoadSettingsTests(unittest.TestCase):
             load_settings({"NOW_PLAYING_WEBHOOK": VALID, "SSE_READ_TIMEOUT": "nan"})
         self.assertIn("SSE_READ_TIMEOUT", str(cm.exception))
 
+    def test_webhook_not_in_repr_or_str(self):
+        url = WEBHOOK_PREFIX + "123/SECRETTOKEN"
+        s = load_settings({"NOW_PLAYING_WEBHOOK": url})
+        self.assertNotIn("SECRETTOKEN", repr(s))
+        self.assertNotIn("SECRETTOKEN", str(s))
+        self.assertEqual(s.webhook_url, url)
+
     def test_station_name_override(self):
         s = load_settings({
             "NOW_PLAYING_WEBHOOK": VALID,
